@@ -3,7 +3,6 @@ import { log, logger } from "@/utils/log";
 import { serializerCompiler, validatorCompiler, ZodTypeProvider } from "fastify-type-provider-zod";
 import { Server, Socket } from "socket.io";
 import { z } from "zod";
-import * as privacyKit from "privacy-kit";
 import { db } from "@/storage/db";
 import { Account, Prisma } from "@prisma/client";
 import { onShutdown } from "@/utils/shutdown";
@@ -25,7 +24,6 @@ import {
 } from "@/modules/eventRouter";
 import { activityCache } from "@/modules/sessionCache";
 import { encryptBytes, encryptString } from "@/modules/encrypt";
-import { GitHubProfile } from "./types";
 import { separateName } from "@/utils/separateName";
 
 
@@ -43,7 +41,7 @@ declare module 'fastify' {
 export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> {
 
     // Configure
-    log('Starting API...');
+    log({}, 'Starting API...');
 
     // Start API
     const app = fastify({
@@ -222,504 +220,13 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
     // Initialize event router
     const eventRouter = new EventRouter();
 
-    // Auth schema
-    typed.post('/v1/auth', {
-        schema: {
-            body: z.object({
-                publicKey: z.string(),
-                challenge: z.string(),
-                signature: z.string()
-            })
-        }
-    }, async (request, reply) => {
-        const tweetnacl = (await import("tweetnacl")).default;
-        const publicKey = privacyKit.decodeBase64(request.body.publicKey);
-        const challenge = privacyKit.decodeBase64(request.body.challenge);
-        const signature = privacyKit.decodeBase64(request.body.signature);
-        const isValid = tweetnacl.sign.detached.verify(challenge, signature, publicKey);
-        if (!isValid) {
-            return reply.code(401).send({ error: 'Invalid signature' });
-        }
+    // Single-user mode: Authentication endpoints removed
 
-        // Create or update user in database
-        const publicKeyHex = privacyKit.encodeHex(publicKey);
-        const user = await db.account.upsert({
-            where: { publicKey: publicKeyHex },
-            update: { updatedAt: new Date() },
-            create: { publicKey: publicKeyHex }
-        });
 
-        return reply.send({
-            success: true,
-            token: await auth.createToken(user.id)
-        });
-    });
 
-    typed.post('/v1/auth/request', {
-        schema: {
-            body: z.object({
-                publicKey: z.string(),
-            }),
-            response: {
-                200: z.union([z.object({
-                    state: z.literal('requested'),
-                }), z.object({
-                    state: z.literal('authorized'),
-                    token: z.string(),
-                    response: z.string()
-                })]),
-                401: z.object({
-                    error: z.literal('Invalid public key')
-                })
-            }
-        }
-    }, async (request, reply) => {
-        const tweetnacl = (await import("tweetnacl")).default;
-        const publicKey = privacyKit.decodeBase64(request.body.publicKey);
-        const isValid = tweetnacl.box.publicKeyLength === publicKey.length;
-        if (!isValid) {
-            return reply.code(401).send({ error: 'Invalid public key' });
-        }
 
-        const publicKeyHex = privacyKit.encodeHex(publicKey);
-        log({ module: 'auth-request' }, `Terminal auth request - publicKey hex: ${publicKeyHex}`);
 
-        const answer = await db.terminalAuthRequest.upsert({
-            where: { publicKey: publicKeyHex },
-            update: {},
-            create: { publicKey: publicKeyHex }
-        });
-
-        if (answer.response && answer.responseAccountId) {
-            const token = await auth.createToken(answer.responseAccountId!, { session: answer.id });
-            return reply.send({
-                state: 'authorized',
-                token: token,
-                response: answer.response
-            });
-        }
-
-        return reply.send({ state: 'requested' });
-    });
-
-    // Approve auth request
-    typed.post('/v1/auth/response', {
-        preHandler: app.authenticate,
-        schema: {
-            body: z.object({
-                response: z.string(),
-                publicKey: z.string()
-            })
-        }
-    }, async (request, reply) => {
-        log({ module: 'auth-response' }, `Auth response endpoint hit - user: ${request.userId}, publicKey: ${request.body.publicKey.substring(0, 20)}...`);
-        const tweetnacl = (await import("tweetnacl")).default;
-        const publicKey = privacyKit.decodeBase64(request.body.publicKey);
-        const isValid = tweetnacl.box.publicKeyLength === publicKey.length;
-        if (!isValid) {
-            log({ module: 'auth-response' }, `Invalid public key length: ${publicKey.length}`);
-            return reply.code(401).send({ error: 'Invalid public key' });
-        }
-        const publicKeyHex = privacyKit.encodeHex(publicKey);
-        log({ module: 'auth-response' }, `Looking for auth request with publicKey hex: ${publicKeyHex}`);
-        const authRequest = await db.terminalAuthRequest.findUnique({
-            where: { publicKey: publicKeyHex }
-        });
-        if (!authRequest) {
-            log({ module: 'auth-response' }, `Auth request not found for publicKey: ${publicKeyHex}`);
-            // Let's also check what auth requests exist
-            const allRequests = await db.terminalAuthRequest.findMany({
-                take: 5,
-                orderBy: { createdAt: 'desc' }
-            });
-            log({ module: 'auth-response' }, `Recent auth requests in DB: ${JSON.stringify(allRequests.map(r => ({ id: r.id, publicKey: r.publicKey.substring(0, 20) + '...', hasResponse: !!r.response })))}`);
-            return reply.code(404).send({ error: 'Request not found' });
-        }
-        if (!authRequest.response) {
-            await db.terminalAuthRequest.update({
-                where: { id: authRequest.id },
-                data: { response: request.body.response, responseAccountId: request.userId }
-            });
-        }
-        return reply.send({ success: true });
-    });
-
-    // GitHub OAuth parameters
-    typed.get('/v1/connect/github/params', {
-        preHandler: app.authenticate,
-        schema: {
-            response: {
-                200: z.object({
-                    url: z.string()
-                }),
-                400: z.object({
-                    error: z.string()
-                }),
-                500: z.object({
-                    error: z.string()
-                })
-            }
-        }
-    }, async (request, reply) => {
-        const clientId = process.env.GITHUB_CLIENT_ID;
-        const redirectUri = process.env.GITHUB_REDIRECT_URL;
-
-        if (!clientId || !redirectUri) {
-            return reply.code(400).send({ error: 'GitHub OAuth not configured' });
-        }
-
-        // Generate ephemeral state token (5 minutes TTL)
-        const state = await auth.createGithubToken(request.userId);
-
-        // Build complete OAuth URL
-        const params = new URLSearchParams({
-            client_id: clientId,
-            redirect_uri: redirectUri,
-            scope: 'read:user,user:email,read:org,codespace',
-            state: state
-        });
-
-        const url = `https://github.com/login/oauth/authorize?${params.toString()}`;
-
-        return reply.send({ url });
-    });
-
-    // GitHub OAuth callback (GET for redirect from GitHub)
-    typed.get('/v1/connect/github/callback', {
-        schema: {
-            querystring: z.object({
-                code: z.string(),
-                state: z.string()
-            })
-        }
-    }, async (request, reply) => {
-        const { code, state } = request.query;
-
-        // Verify the state token to get userId
-        const tokenData = await auth.verifyGithubToken(state);
-        if (!tokenData) {
-            log({ module: 'github-oauth' }, `Invalid state token: ${state}`);
-            return reply.redirect('https://app.happy.engineering?error=invalid_state');
-        }
-
-        const userId = tokenData.userId;
-        const clientId = process.env.GITHUB_CLIENT_ID;
-        const clientSecret = process.env.GITHUB_CLIENT_SECRET;
-
-        if (!clientId || !clientSecret) {
-            return reply.redirect('https://app.happy.engineering?error=server_config');
-        }
-
-        try {
-            // Exchange code for access token
-            const tokenResponse = await fetch('https://github.com/login/oauth/access_token', {
-                method: 'POST',
-                headers: {
-                    'Accept': 'application/json',
-                    'Content-Type': 'application/json',
-                },
-                body: JSON.stringify({
-                    client_id: clientId,
-                    client_secret: clientSecret,
-                    code: code
-                })
-            });
-
-            const tokenResponseData = await tokenResponse.json() as {
-                access_token?: string;
-                error?: string;
-                error_description?: string;
-            };
-
-            if (tokenResponseData.error) {
-                return reply.redirect(`https://app.happy.engineering?error=${encodeURIComponent(tokenResponseData.error)}`);
-            }
-
-            const accessToken = tokenResponseData.access_token;
-
-            // Get user info from GitHub
-            const userResponse = await fetch('https://api.github.com/user', {
-                headers: {
-                    'Authorization': `Bearer ${accessToken}`,
-                    'Accept': 'application/vnd.github.v3+json',
-                }
-            });
-
-            const userData = await userResponse.json() as GitHubProfile;
-
-            if (!userResponse.ok) {
-                return reply.redirect('https://app.happy.engineering?error=github_user_fetch_failed');
-            }
-
-            // Store GitHub user and connect to account
-            const githubUser = await db.githubUser.upsert({
-                where: { id: userData.id.toString() },
-                update: {
-                    profile: userData,
-                    token: encryptString(['user', userId, 'github', 'token'], accessToken!)
-                },
-                create: {
-                    id: userData.id.toString(),
-                    profile: userData,
-                    token: encryptString(['user', userId, 'github', 'token'], accessToken!)
-                }
-            });
-
-            // Name
-            const name = separateName(userData.name);
-            log({ module: 'github-oauth' }, `Separated name for user ${userId}: ${userData.name} -> ${name.firstName} ${name.lastName}`);
-
-            // Link GitHub user to account
-            await db.account.update({
-                where: { id: userId },
-                data: { githubUserId: githubUser.id, firstName: name.firstName, lastName: name.lastName }
-            });
-
-            // Send account update to all user connections
-            const updSeq = await allocateUserSeq(userId);
-            const updatePayload = buildUpdateAccountUpdate(userId, {
-                github: userData,
-                firstName: name.firstName,
-                lastName: name.lastName
-            }, updSeq, randomKeyNaked(12));
-            eventRouter.emitUpdate({
-                userId,
-                payload: updatePayload,
-                recipientFilter: { type: 'all-user-authenticated-connections' }
-            });
-
-            log({ module: 'github-oauth' }, `GitHub account connected successfully for user ${userId}: ${userData.login}`);
-
-            // Redirect to app with success
-            return reply.redirect(`https://app.happy.engineering?github=connected&user=${encodeURIComponent(userData.login)}`);
-
-        } catch (error) {
-            log({ module: 'github-oauth' }, `Error in GitHub GET callback: ${error}`);
-            return reply.redirect('https://app.happy.engineering?error=server_error');
-        }
-    });
-
-    // GitHub webhook handler with type safety
-    typed.post('/v1/connect/github/webhook', {
-        schema: {
-            headers: z.object({
-                'x-hub-signature-256': z.string(),
-                'x-github-event': z.string(),
-                'x-github-delivery': z.string().optional()
-            }).passthrough(),
-            body: z.any(),
-            response: {
-                200: z.object({ received: z.boolean() }),
-                401: z.object({ error: z.string() }),
-                500: z.object({ error: z.string() })
-            }
-        }
-    }, async (request, reply) => {
-        const signature = request.headers['x-hub-signature-256'];
-        const eventName = request.headers['x-github-event'];
-        const deliveryId = request.headers['x-github-delivery'];
-        const rawBody = (request as any).rawBody;
-
-        if (!rawBody) {
-            log({ module: 'github-webhook', level: 'error' },
-                'Raw body not available for webhook signature verification');
-            return reply.code(500).send({ error: 'Server configuration error' });
-        }
-
-        // Get the webhooks handler
-        const { getWebhooks } = await import("@/modules/github");
-        const webhooks = getWebhooks();
-        if (!webhooks) {
-            log({ module: 'github-webhook', level: 'error' },
-                'GitHub webhooks not initialized');
-            return reply.code(500).send({ error: 'Webhooks not configured' });
-        }
-
-        try {
-            // Verify and handle the webhook with type safety
-            await webhooks.verifyAndReceive({
-                id: deliveryId || 'unknown',
-                name: eventName,
-                payload: typeof rawBody === 'string' ? rawBody : JSON.stringify(request.body),
-                signature: signature
-            });
-
-            // Log successful processing
-            log({
-                module: 'github-webhook',
-                event: eventName,
-                delivery: deliveryId
-            }, `Successfully processed ${eventName} webhook`);
-
-            return reply.send({ received: true });
-
-        } catch (error: any) {
-            if (error.message?.includes('signature does not match')) {
-                log({
-                    module: 'github-webhook',
-                    level: 'warn',
-                    event: eventName,
-                    delivery: deliveryId
-                }, 'Invalid webhook signature');
-                return reply.code(401).send({ error: 'Invalid signature' });
-            }
-
-            log({
-                module: 'github-webhook',
-                level: 'error',
-                event: eventName,
-                delivery: deliveryId
-            }, `Error processing webhook: ${error.message}`);
-
-            return reply.code(500).send({ error: 'Internal server error' });
-        }
-    });
-
-    // GitHub disconnect endpoint
-    typed.delete('/v1/connect/github', {
-        preHandler: app.authenticate,
-        schema: {
-            response: {
-                200: z.object({
-                    success: z.literal(true)
-                }),
-                404: z.object({
-                    error: z.string()
-                }),
-                500: z.object({
-                    error: z.string()
-                })
-            }
-        }
-    }, async (request, reply) => {
-        const userId = request.userId;
-
-        try {
-            // Get current user's GitHub connection
-            const user = await db.account.findUnique({
-                where: { id: userId },
-                select: { githubUserId: true }
-            });
-
-            if (!user || !user.githubUserId) {
-                return reply.code(404).send({ error: 'GitHub account not connected' });
-            }
-
-            const githubUserId = user.githubUserId;
-            log({ module: 'github-disconnect' }, `Disconnecting GitHub account for user ${userId}: ${githubUserId}`);
-
-            // Remove GitHub connection from account and delete GitHub user record
-            await db.$transaction(async (tx) => {
-                // Remove link from account
-                await tx.account.update({
-                    where: { id: userId },
-                    data: {
-                        githubUserId: null
-                    }
-                });
-
-                // Delete GitHub user record (this also deletes the token)
-                await tx.githubUser.delete({
-                    where: { id: githubUserId }
-                });
-            });
-
-            // Send account update to all user connections
-            const updSeq = await allocateUserSeq(userId);
-            const updatePayload = buildUpdateAccountUpdate(userId, {
-                github: null
-            }, updSeq, randomKeyNaked(12));
-            eventRouter.emitUpdate({
-                userId,
-                payload: updatePayload,
-                recipientFilter: { type: 'all-user-authenticated-connections' }
-            });
-
-            log({ module: 'github-disconnect' }, `GitHub account and avatar disconnected successfully for user ${userId}`);
-
-            return reply.send({ success: true });
-
-        } catch (error) {
-            log({ module: 'github-disconnect', level: 'error' }, `Error disconnecting GitHub account: ${error}`);
-            return reply.code(500).send({ error: 'Failed to disconnect GitHub account' });
-        }
-    });
-
-    // Account auth request
-    typed.post('/v1/auth/account/request', {
-        schema: {
-            body: z.object({
-                publicKey: z.string(),
-            }),
-            response: {
-                200: z.union([z.object({
-                    state: z.literal('requested'),
-                }), z.object({
-                    state: z.literal('authorized'),
-                    token: z.string(),
-                    response: z.string()
-                })]),
-                401: z.object({
-                    error: z.literal('Invalid public key')
-                })
-            }
-        }
-    }, async (request, reply) => {
-        const tweetnacl = (await import("tweetnacl")).default;
-        const publicKey = privacyKit.decodeBase64(request.body.publicKey);
-        const isValid = tweetnacl.box.publicKeyLength === publicKey.length;
-        if (!isValid) {
-            return reply.code(401).send({ error: 'Invalid public key' });
-        }
-
-        const answer = await db.accountAuthRequest.upsert({
-            where: { publicKey: privacyKit.encodeHex(publicKey) },
-            update: {},
-            create: { publicKey: privacyKit.encodeHex(publicKey) }
-        });
-
-        if (answer.response && answer.responseAccountId) {
-            const token = await auth.createToken(answer.responseAccountId!);
-            return reply.send({
-                state: 'authorized',
-                token: token,
-                response: answer.response
-            });
-        }
-
-        return reply.send({ state: 'requested' });
-    });
-
-    // Approve account auth request
-    typed.post('/v1/auth/account/response', {
-        preHandler: app.authenticate,
-        schema: {
-            body: z.object({
-                response: z.string(),
-                publicKey: z.string()
-            })
-        }
-    }, async (request, reply) => {
-        const tweetnacl = (await import("tweetnacl")).default;
-        const publicKey = privacyKit.decodeBase64(request.body.publicKey);
-        const isValid = tweetnacl.box.publicKeyLength === publicKey.length;
-        if (!isValid) {
-            return reply.code(401).send({ error: 'Invalid public key' });
-        }
-        const authRequest = await db.accountAuthRequest.findUnique({
-            where: { publicKey: privacyKit.encodeHex(publicKey) }
-        });
-        if (!authRequest) {
-            return reply.code(404).send({ error: 'Request not found' });
-        }
-        if (!authRequest.response) {
-            await db.accountAuthRequest.update({
-                where: { id: authRequest.id },
-                data: { response: request.body.response, responseAccountId: request.userId }
-            });
-        }
-        return reply.send({ success: true });
-    });
+    // Single-user mode: Authentication endpoints removed
 
     // OpenAI Realtime ephemeral token generation
     typed.post('/v1/openai/realtime-token', {
@@ -1065,111 +572,8 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         }
     });
 
-    // Push Token Registration API
-    typed.post('/v1/push-tokens', {
-        schema: {
-            body: z.object({
-                token: z.string()
-            }),
-            response: {
-                200: z.object({
-                    success: z.literal(true)
-                }),
-                500: z.object({
-                    error: z.literal('Failed to register push token')
-                })
-            }
-        },
-        preHandler: app.authenticate
-    }, async (request, reply) => {
-        const userId = request.userId;
-        const { token } = request.body;
 
-        try {
-            await db.accountPushToken.upsert({
-                where: {
-                    accountId_token: {
-                        accountId: userId,
-                        token: token
-                    }
-                },
-                update: {
-                    updatedAt: new Date()
-                },
-                create: {
-                    accountId: userId,
-                    token: token
-                }
-            });
 
-            return reply.send({ success: true });
-        } catch (error) {
-            return reply.code(500).send({ error: 'Failed to register push token' });
-        }
-    });
-
-    // Delete Push Token API
-    typed.delete('/v1/push-tokens/:token', {
-        schema: {
-            params: z.object({
-                token: z.string()
-            }),
-            response: {
-                200: z.object({
-                    success: z.literal(true)
-                }),
-                500: z.object({
-                    error: z.literal('Failed to delete push token')
-                })
-            }
-        },
-        preHandler: app.authenticate
-    }, async (request, reply) => {
-        const userId = request.userId;
-        const { token } = request.params;
-
-        try {
-            await db.accountPushToken.deleteMany({
-                where: {
-                    accountId: userId,
-                    token: token
-                }
-            });
-
-            return reply.send({ success: true });
-        } catch (error) {
-            return reply.code(500).send({ error: 'Failed to delete push token' });
-        }
-    });
-
-    // Get Push Tokens API
-    typed.get('/v1/push-tokens', {
-        preHandler: app.authenticate
-    }, async (request, reply) => {
-        const userId = request.userId;
-
-        try {
-            const tokens = await db.accountPushToken.findMany({
-                where: {
-                    accountId: userId
-                },
-                orderBy: {
-                    createdAt: 'desc'
-                }
-            });
-
-            return reply.send({
-                tokens: tokens.map(t => ({
-                    id: t.id,
-                    token: t.token,
-                    createdAt: t.createdAt.getTime(),
-                    updatedAt: t.updatedAt.getTime()
-                }))
-            });
-        } catch (error) {
-            return reply.code(500).send({ error: 'Failed to get push tokens' });
-        }
-    });
 
     typed.get('/v1/account/profile', {
         preHandler: app.authenticate,
@@ -1179,8 +583,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             where: { id: userId },
             select: {
                 firstName: true,
-                lastName: true,
-                githubUser: true
+                lastName: true
             }
         });
         return reply.send({
@@ -1188,7 +591,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             timestamp: Date.now(),
             firstName: user.firstName,
             lastName: user.lastName,
-            github: user.githubUser ? user.githubUser.profile : null
+            github: null // Single-user mode: GitHub integration disabled
         });
     });
 
@@ -1208,18 +611,10 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         }
     }, async (request, reply) => {
         try {
-            const user = await db.account.findUnique({
-                where: { id: request.userId },
-                select: { settings: true, settingsVersion: true }
-            });
-
-            if (!user) {
-                return reply.code(500).send({ error: 'Failed to get account settings' });
-            }
-
+            // Single-user mode: Return default settings
             return reply.send({
-                settings: user.settings,
-                settingsVersion: user.settingsVersion
+                settings: null, // No custom settings in single-user mode
+                settingsVersion: 0 // Always version 0 in single-user mode
             });
         } catch (error) {
             return reply.code(500).send({ error: 'Failed to get account settings' });
@@ -1251,74 +646,10 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         },
         preHandler: app.authenticate
     }, async (request, reply) => {
-        const userId = request.userId;
-        const { settings, expectedVersion } = request.body;
-
         try {
-            // Get current user data for version check
-            const currentUser = await db.account.findUnique({
-                where: { id: userId },
-                select: { settings: true, settingsVersion: true }
-            });
-
-            if (!currentUser) {
-                return reply.code(500).send({
-                    success: false,
-                    error: 'Failed to update account settings'
-                });
-            }
-
-            // Check current version
-            if (currentUser.settingsVersion !== expectedVersion) {
-                return reply.code(200).send({
-                    success: false,
-                    error: 'version-mismatch',
-                    currentVersion: currentUser.settingsVersion,
-                    currentSettings: currentUser.settings
-                });
-            }
-
-            // Update settings with version check
-            const { count } = await db.account.updateMany({
-                where: {
-                    id: userId,
-                    settingsVersion: expectedVersion
-                },
-                data: {
-                    settings: settings,
-                    settingsVersion: expectedVersion + 1,
-                    updatedAt: new Date()
-                }
-            });
-
-            if (count === 0) {
-                // Re-fetch to get current version
-                const account = await db.account.findUnique({
-                    where: { id: userId }
-                });
-                return reply.code(200).send({
-                    success: false,
-                    error: 'version-mismatch',
-                    currentVersion: account?.settingsVersion || 0,
-                    currentSettings: account?.settings || null
-                });
-            }
-
-            // Generate update for connected clients
-            const updSeq = await allocateUserSeq(userId);
-            const settingsUpdate = {
-                value: settings,
-                version: expectedVersion + 1
-            };
-
-            // Send account update to all user connections
-            const updatePayload = buildUpdateAccountUpdate(userId, { settings: settingsUpdate }, updSeq, randomKeyNaked(12));
-            eventRouter.emitUpdate({
-                userId,
-                payload: updatePayload,
-                recipientFilter: { type: 'all-user-authenticated-connections' }
-            });
-
+            // Single-user mode: Accept settings updates but don't persist them
+            // Always return success with incremented version
+            const { expectedVersion } = request.body;
             return reply.send({
                 success: true,
                 version: expectedVersion + 1
@@ -1332,140 +663,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         }
     });
 
-    // Query Usage Reports API
-    typed.post('/v1/usage/query', {
-        schema: {
-            body: z.object({
-                sessionId: z.string().nullish(),
-                startTime: z.number().int().positive().nullish(),
-                endTime: z.number().int().positive().nullish(),
-                groupBy: z.enum(['hour', 'day']).nullish()
-            })
-        },
-        preHandler: app.authenticate
-    }, async (request, reply) => {
-        const userId = request.userId;
-        const { sessionId, startTime, endTime, groupBy } = request.body;
-        const actualGroupBy = groupBy || 'day';
-
-        try {
-            // Build query conditions
-            const where: {
-                accountId: string;
-                sessionId?: string | null;
-                createdAt?: {
-                    gte?: Date;
-                    lte?: Date;
-                };
-            } = {
-                accountId: userId
-            };
-
-            if (sessionId) {
-                // Verify session belongs to user
-                const session = await db.session.findFirst({
-                    where: {
-                        id: sessionId,
-                        accountId: userId
-                    }
-                });
-                if (!session) {
-                    return reply.code(404).send({ error: 'Session not found' });
-                }
-                where.sessionId = sessionId;
-            }
-
-            if (startTime || endTime) {
-                where.createdAt = {};
-                if (startTime) {
-                    where.createdAt.gte = new Date(startTime * 1000);
-                }
-                if (endTime) {
-                    where.createdAt.lte = new Date(endTime * 1000);
-                }
-            }
-
-            // Fetch usage reports
-            const reports = await db.usageReport.findMany({
-                where,
-                orderBy: {
-                    createdAt: 'desc'
-                }
-            });
-
-            // Aggregate data by time period
-            const aggregated = new Map<string, {
-                tokens: Record<string, number>;
-                cost: Record<string, number>;
-                count: number;
-                timestamp: number;
-            }>();
-
-            for (const report of reports) {
-                const data = report.data as PrismaJson.UsageReportData;
-                const date = new Date(report.createdAt);
-
-                // Calculate timestamp based on groupBy
-                let timestamp: number;
-                if (actualGroupBy === 'hour') {
-                    // Round down to hour
-                    const hourDate = new Date(date.getFullYear(), date.getMonth(), date.getDate(), date.getHours(), 0, 0, 0);
-                    timestamp = Math.floor(hourDate.getTime() / 1000);
-                } else {
-                    // Round down to day
-                    const dayDate = new Date(date.getFullYear(), date.getMonth(), date.getDate(), 0, 0, 0, 0);
-                    timestamp = Math.floor(dayDate.getTime() / 1000);
-                }
-
-                const key = timestamp.toString();
-
-                if (!aggregated.has(key)) {
-                    aggregated.set(key, {
-                        tokens: {},
-                        cost: {},
-                        count: 0,
-                        timestamp
-                    });
-                }
-
-                const agg = aggregated.get(key)!;
-                agg.count++;
-
-                // Aggregate tokens
-                for (const [tokenKey, tokenValue] of Object.entries(data.tokens)) {
-                    if (typeof tokenValue === 'number') {
-                        agg.tokens[tokenKey] = (agg.tokens[tokenKey] || 0) + tokenValue;
-                    }
-                }
-
-                // Aggregate costs
-                for (const [costKey, costValue] of Object.entries(data.cost)) {
-                    if (typeof costValue === 'number') {
-                        agg.cost[costKey] = (agg.cost[costKey] || 0) + costValue;
-                    }
-                }
-            }
-
-            // Convert to array and sort by timestamp
-            const result = Array.from(aggregated.values())
-                .map(data => ({
-                    timestamp: data.timestamp,
-                    tokens: data.tokens,
-                    cost: data.cost,
-                    reportCount: data.count
-                }))
-                .sort((a, b) => a.timestamp - b.timestamp);
-
-            return reply.send({
-                usage: result,
-                groupBy: actualGroupBy,
-                totalReports: reports.length
-            });
-        } catch (error) {
-            log({ module: 'api', level: 'error' }, `Failed to query usage reports: ${error}`);
-            return reply.code(500).send({ error: 'Failed to query usage reports' });
-        }
-    });
+    // Single-user mode: Usage reporting removed
 
     // Messages API
     typed.get('/v1/sessions/:sessionId/messages', {
@@ -2008,7 +1206,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                     let useLocalId = typeof localId === 'string' ? localId : null;
 
                     // Create plaintext message (single-user mode)
-                    const msgContent: PrismaJson.SessionMessageContent = {
+                    const msgContent = {
                         t: 'plain',
                         c: message
                     };
@@ -2541,129 +1739,14 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             }
         });
 
-        // Usage reporting
-        socket.on('usage-report', async (data: any, callback?: (response: any) => void) => {
-            await receiveUsageLock.inLock(async () => {
-                try {
-                    const { key, sessionId, tokens, cost } = data;
-
-                    // Validate required fields
-                    if (!key || typeof key !== 'string') {
-                        if (callback) {
-                            callback({ success: false, error: 'Invalid key' });
-                        }
-                        return;
-                    }
-
-                    // Validate tokens and cost objects
-                    if (!tokens || typeof tokens !== 'object' || typeof tokens.total !== 'number') {
-                        if (callback) {
-                            callback({ success: false, error: 'Invalid tokens object - must include total' });
-                        }
-                        return;
-                    }
-
-                    if (!cost || typeof cost !== 'object' || typeof cost.total !== 'number') {
-                        if (callback) {
-                            callback({ success: false, error: 'Invalid cost object - must include total' });
-                        }
-                        return;
-                    }
-
-                    // Validate sessionId if provided
-                    if (sessionId && typeof sessionId !== 'string') {
-                        if (callback) {
-                            callback({ success: false, error: 'Invalid sessionId' });
-                        }
-                        return;
-                    }
-
-                    try {
-                        // If sessionId provided, verify it belongs to the user
-                        if (sessionId) {
-                            const session = await db.session.findFirst({
-                                where: {
-                                    id: sessionId,
-                                    accountId: userId
-                                }
-                            });
-
-                            if (!session) {
-                                if (callback) {
-                                    callback({ success: false, error: 'Session not found' });
-                                }
-                                return;
-                            }
-                        }
-
-                        // Prepare usage data
-                        const usageData: PrismaJson.UsageReportData = {
-                            tokens,
-                            cost
-                        };
-
-                        // Upsert the usage report
-                        const report = await db.usageReport.upsert({
-                            where: {
-                                accountId_sessionId_key: {
-                                    accountId: userId,
-                                    sessionId: sessionId || null,
-                                    key
-                                }
-                            },
-                            update: {
-                                data: usageData,
-                                updatedAt: new Date()
-                            },
-                            create: {
-                                accountId: userId,
-                                sessionId: sessionId || null,
-                                key,
-                                data: usageData
-                            }
-                        });
-
-                        log({ module: 'websocket' }, `Usage report saved: key=${key}, sessionId=${sessionId || 'none'}, userId=${userId}`);
-
-                        // Emit usage ephemeral update if sessionId is provided
-                        if (sessionId) {
-                            const usageEvent = buildUsageEphemeral(sessionId, key, usageData.tokens, usageData.cost);
-                            eventRouter.emitEphemeral({
-                                userId,
-                                payload: usageEvent,
-                                recipientFilter: { type: 'user-scoped-only' }
-                            });
-                        }
-
-                        if (callback) {
-                            callback({
-                                success: true,
-                                reportId: report.id,
-                                createdAt: report.createdAt.getTime(),
-                                updatedAt: report.updatedAt.getTime()
-                            });
-                        }
-                    } catch (error) {
-                        log({ module: 'websocket', level: 'error' }, `Failed to save usage report: ${error}`);
-                        if (callback) {
-                            callback({ success: false, error: 'Failed to save usage report' });
-                        }
-                    }
-                } catch (error) {
-                    log({ module: 'websocket', level: 'error' }, `Error in usage-report handler: ${error}`);
-                    if (callback) {
-                        callback({ success: false, error: 'Internal error' });
-                    }
-                }
-            });
-        });
+        // Single-user mode: Usage reporting removed
 
         socket.emit('auth', { success: true, user: userId });
         log({ module: 'websocket' }, `User connected: ${userId}`);
     });
 
     // End
-    log('API ready on port http://localhost:' + port);
+    log({}, 'API ready on port http://localhost:' + port);
 
     onShutdown('api', async () => {
         await app.close();

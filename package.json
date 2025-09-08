@@ -8,14 +8,13 @@
   "type": "module",
   "scripts": {
     "build": "tsc --noEmit",
-    "start": "tsx ./sources/main.ts",
-    "dev": "tsx --env-file=.env --env-file=.env.dev ./sources/main.ts",
+    "start": "tsx --env-file=.env ./sources/main.ts",
+    "dev": "tsx  --env-file=.env.dev ./sources/main.ts",
     "test": "vitest run",
-    "migrate": "dotenv -e .env.dev -- prisma migrate dev",
+    "migrate": "dotenv -e .env -- prisma migrate deploy",
     "migrate:reset": "dotenv -e .env.dev -- prisma migrate reset",
     "generate": "prisma generate",
-    "postinstall": "prisma generate",
-    "db:old": "echo 'PostgreSQL database script disabled - now using SQLite'"
+    "postinstall": "prisma generate"
   },
   "devDependencies": {
     "@types/chalk": "^2.2.0",

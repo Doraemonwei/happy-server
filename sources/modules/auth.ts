@@ -1,4 +1,4 @@
-import * as privacyKit from "privacy-kit";
+// Single-user mode: Authentication disabled - all functions are no-ops
 import { log } from "@/utils/log";
 
 interface TokenCacheEntry {
@@ -7,126 +7,39 @@ interface TokenCacheEntry {
     cachedAt: number;
 }
 
-interface AuthTokens {
-    generator: Awaited<ReturnType<typeof privacyKit.createPersistentTokenGenerator>>;
-    verifier: Awaited<ReturnType<typeof privacyKit.createPersistentTokenVerifier>>;
-    githubVerifier: Awaited<ReturnType<typeof privacyKit.createEphemeralTokenVerifier>>;
-    githubGenerator: Awaited<ReturnType<typeof privacyKit.createEphemeralTokenGenerator>>;
-}
-
 class AuthModule {
     private tokenCache = new Map<string, TokenCacheEntry>();
-    private tokens: AuthTokens | null = null;
     
     async init(): Promise<void> {
-        if (this.tokens) {
-            return; // Already initialized
-        }
-        
-        log({ module: 'auth' }, 'Initializing auth module...');
-        
-        const generator = await privacyKit.createPersistentTokenGenerator({
-            service: 'handy',
-            seed: process.env.HANDY_MASTER_SECRET!
-        });
-
-        
-        const verifier = await privacyKit.createPersistentTokenVerifier({
-            service: 'handy',
-            publicKey: generator.publicKey
-        });
-        
-        const githubGenerator = await privacyKit.createEphemeralTokenGenerator({
-            service: 'github-happy',
-            seed: process.env.HANDY_MASTER_SECRET!,
-            ttl: 5 * 60 * 1000 // 5 minutes
-        });
-
-        const githubVerifier = await privacyKit.createEphemeralTokenVerifier({
-            service: 'github-happy',
-            publicKey: githubGenerator.publicKey,
-        });
-
-
-        this.tokens = { generator, verifier, githubVerifier, githubGenerator };
-        
-        log({ module: 'auth' }, 'Auth module initialized');
+        log({ module: 'auth' }, 'Single-user mode: Auth module disabled');
     }
     
     async createToken(userId: string, extras?: any): Promise<string> {
-        if (!this.tokens) {
-            throw new Error('Auth module not initialized');
-        }
-        
-        const payload: any = { user: userId };
-        if (extras) {
-            payload.extras = extras;
-        }
-        
-        const token = await this.tokens.generator.new(payload);
-        
-        // Cache the token immediately
+        // Single-user mode: return a placeholder token
+        const token = `single-user-token-${userId}-${Date.now()}`;
         this.tokenCache.set(token, {
             userId,
             extras,
             cachedAt: Date.now()
         });
-        
         return token;
     }
     
     async verifyToken(token: string): Promise<{ userId: string; extras?: any } | null> {
-        // Check cache first
-        const cached = this.tokenCache.get(token);
-        if (cached) {
-            return {
-                userId: cached.userId,
-                extras: cached.extras
-            };
-        }
-        
-        // Cache miss - verify token
-        if (!this.tokens) {
-            throw new Error('Auth module not initialized');
-        }
-        
-        try {
-            const verified = await this.tokens.verifier.verify(token);
-            if (!verified) {
-                return null;
-            }
-            
-            const userId = verified.user as string;
-            const extras = verified.extras;
-            
-            // Cache the result permanently
-            this.tokenCache.set(token, {
-                userId,
-                extras,
-                cachedAt: Date.now()
-            });
-            
-            return { userId, extras };
-            
-        } catch (error) {
-            log({ module: 'auth', level: 'error' }, `Token verification failed: ${error}`);
-            return null;
-        }
+        // Single-user mode: always return default user
+        return {
+            userId: 'default-user',
+            extras: undefined
+        };
     }
     
     invalidateUserTokens(userId: string): void {
-        // Remove all tokens for a specific user
-        // This is expensive but rarely needed
-        for (const [token, entry] of this.tokenCache.entries()) {
-            if (entry.userId === userId) {
-                this.tokenCache.delete(token);
-            }
-        }
-        
-        log({ module: 'auth' }, `Invalidated tokens for user: ${userId}`);
+        // Single-user mode: no-op
+        log({ module: 'auth' }, `Single-user mode: Invalidated tokens for user: ${userId}`);
     }
     
     invalidateToken(token: string): void {
+        // Single-user mode: no-op
         this.tokenCache.delete(token);
     }
     
@@ -149,40 +62,19 @@ class AuthModule {
     }
     
     async createGithubToken(userId: string): Promise<string> {
-        if (!this.tokens) {
-            throw new Error('Auth module not initialized');
-        }
-        
-        const payload = { user: userId, purpose: 'github-oauth' };
-        const token = await this.tokens.githubGenerator.new(payload);
-        
-        return token;
+        // Single-user mode: return a placeholder token
+        return `single-user-github-token-${userId}-${Date.now()}`;
     }
 
     async verifyGithubToken(token: string): Promise<{ userId: string } | null> {
-        if (!this.tokens) {
-            throw new Error('Auth module not initialized');
-        }
-        
-        try {
-            const verified = await this.tokens.githubVerifier.verify(token);
-            if (!verified) {
-                return null;
-            }
-            
-            return { userId: verified.user as string };
-        } catch (error) {
-            log({ module: 'auth', level: 'error' }, `GitHub token verification failed: ${error}`);
-            return null;
-        }
+        // Single-user mode: always return default user
+        return { userId: 'default-user' };
     }
 
     // Cleanup old entries (optional - can be called periodically)
     cleanup(): void {
-        // Note: Since tokens are cached "forever" as requested,
-        // we don't do automatic cleanup. This method exists if needed later.
         const stats = this.getCacheStats();
-        log({ module: 'auth' }, `Token cache size: ${stats.size} entries`);
+        log({ module: 'auth' }, `Single-user mode: Token cache size: ${stats.size} entries`);
     }
 }
 

@@ -37,11 +37,11 @@ export function isShutdown() {
 export async function awaitShutdown() {
     await new Promise<void>((resolve) => {
         process.on('SIGINT', async () => {
-            log('Received SIGINT signal. Exiting...');
+            log({}, 'Received SIGINT signal. Exiting...');
             resolve();
         });
         process.on('SIGTERM', async () => {
-            log('Received SIGTERM signal. Exiting...');
+            log({}, 'Received SIGTERM signal. Exiting...');
             resolve();
         });
     });
@@ -59,7 +59,7 @@ export async function awaitShutdown() {
     
     for (const [name, handlers] of handlersSnapshot) {
         totalHandlers += handlers.length;
-        log(`Starting ${handlers.length} shutdown handlers for: ${name}`);
+        log({}, `Starting ${handlers.length} shutdown handlers for: ${name}`);
         
         handlers.forEach((handler, index) => {
             const handlerPromise = handler().then(
@@ -71,11 +71,11 @@ export async function awaitShutdown() {
     }
     
     if (totalHandlers > 0) {
-        log(`Waiting for ${totalHandlers} shutdown handlers to complete...`);
+        log({}, `Waiting for ${totalHandlers} shutdown handlers to complete...`);
         const startTime = Date.now();
         await Promise.all(allHandlers);
         const duration = Date.now() - startTime;
-        log(`All ${totalHandlers} shutdown handlers completed in ${duration}ms`);
+        log({}, `All ${totalHandlers} shutdown handlers completed in ${duration}ms`);
     }
 }
 
@@ -87,7 +87,7 @@ export async function keepAlive<T>(name: string, callback: () => Promise<T>): Pr
     const promise = new Promise<void>((resolve) => {
         const unsubscribe = onShutdown(`keepAlive:${name}`, async () => {
             if (!completed) {
-                log(`Waiting for keepAlive operation to complete: ${name}`);
+                log({}, `Waiting for keepAlive operation to complete: ${name}`);
                 await promise;
             }
         });

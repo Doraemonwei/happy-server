@@ -1,26 +1,25 @@
-import { KeyTree, crypto } from "privacy-kit";
-
-let keyTree: KeyTree | null = null;
+// Single-user mode: Encryption disabled - all functions are no-ops
 
 export async function initEncrypt() {
-    keyTree = new KeyTree(await crypto.deriveSecureKey({
-        key: process.env.HANDY_MASTER_SECRET!,
-        usage: 'happy-server-tokens'
-    }));
+    // No-op in single-user mode
 }
 
-export function encryptString(path: string[], string: string) {
-    return keyTree!.symmetricEncrypt(path, string);
+export function encryptString(path: string[], string: string): string {
+    // No encryption in single-user mode, return as-is
+    return string;
 }
 
-export function encryptBytes(path: string[], bytes: Uint8Array) {
-    return keyTree!.symmetricEncrypt(path, bytes);
+export function encryptBytes(path: string[], bytes: Uint8Array): Uint8Array {
+    // No encryption in single-user mode, return as-is  
+    return bytes;
 }
 
-export function decryptString(path: string[], encrypted: Uint8Array) {
-    return keyTree!.symmetricDecryptBuffer(path, encrypted);
+export function decryptString(path: string[], encrypted: Uint8Array): string {
+    // No decryption needed in single-user mode, treat as plain text
+    return new TextDecoder().decode(encrypted);
 }
 
-export function decryptBytes(path: string[], encrypted: Uint8Array) {
-    return keyTree!.symmetricDecryptBuffer(path, encrypted);
+export function decryptBytes(path: string[], encrypted: Uint8Array): Uint8Array {
+    // No decryption needed in single-user mode, return as-is
+    return encrypted;
 }

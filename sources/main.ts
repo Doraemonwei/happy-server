@@ -15,7 +15,7 @@ async function initializeDefaultUser() {
             where: { id: 'default-user' },
             create: { 
                 id: 'default-user',
-                publicKey: 'dummy-single-user-key', // Temporary until schema is simplified in Phase 5
+                publicKey: 'single-user-mode-placeholder', // Required by schema, unused in single-user mode
                 createdAt: new Date(),
                 updatedAt: new Date()
             },
@@ -23,7 +23,7 @@ async function initializeDefaultUser() {
                 updatedAt: new Date()
             }
         });
-        log('Default user initialized successfully');
+        log({}, 'Default user initialized successfully');
     } catch (error) {
         log({ level: 'error' }, `Failed to initialize default user: ${error}`);
         throw error;
@@ -44,8 +44,7 @@ async function main() {
     // Single-user mode: ensure default user exists
     await initializeDefaultUser();
 
-    // Initialize auth module
-    await initEncrypt();
+    // Single-user mode: Skip authentication and encryption initialization
     await initGithub();
     await auth.init();
 
@@ -60,9 +59,9 @@ async function main() {
     // Ready
     //
 
-    log('Ready');
+    log({}, 'Ready');
     await awaitShutdown();
-    log('Shutting down...');
+    log({}, 'Shutting down...');
 }
 
 // Process-level error handling

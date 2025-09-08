@@ -339,7 +339,6 @@ export function buildUpdateAccountUpdate(userId: string, profile: Partial<Accoun
             t: 'update-account',
             id: userId,
             ...profile,
-            avatar: profile.avatar ? { ...profile.avatar, url: getPublicUrl(profile.avatar.path) } : undefined
         },
         createdAt: Date.now()
     };

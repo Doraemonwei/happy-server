@@ -20,58 +20,22 @@ datasource db {
 //
 
 model Account {
-    id              String      @id @default(cuid())
-    publicKey       String      @unique
-    seq             Int         @default(0)
-    createdAt       DateTime    @default(now())
-    updatedAt       DateTime    @updatedAt
-    settings        String?
-    settingsVersion Int         @default(0)
-    githubUserId    String?
-    githubUser      GithubUser? @relation(fields: [githubUserId], references: [id])
-
-    // Profile
-    firstName String?
-    lastName  String?
-
-    Session             Session[]
-    AccountPushToken    AccountPushToken[]
-    TerminalAuthRequest TerminalAuthRequest[]
-    AccountAuthRequest  AccountAuthRequest[]
-    UsageReport         UsageReport[]
-    Machine             Machine[]
-}
-
-model TerminalAuthRequest {
-    id                String   @id @default(cuid())
-    publicKey         String   @unique
-    response          String?
-    responseAccountId String?
-    responseAccount   Account? @relation(fields: [responseAccountId], references: [id])
-    createdAt         DateTime @default(now())
-    updatedAt         DateTime @updatedAt
-}
-
-model AccountAuthRequest {
-    id                String   @id @default(cuid())
-    publicKey         String   @unique
-    response          String?
-    responseAccountId String?
-    responseAccount   Account? @relation(fields: [responseAccountId], references: [id])
-    createdAt         DateTime @default(now())
-    updatedAt         DateTime @updatedAt
-}
-
-model AccountPushToken {
     id        String   @id @default(cuid())
-    accountId String
-    account   Account  @relation(fields: [accountId], references: [id])
-    token     String
+    publicKey String   @unique // Required by current auth system, simplified in single-user mode
+    seq       Int      @default(0)
     createdAt DateTime @default(now())
     updatedAt DateTime @updatedAt
 
-    @@unique([accountId, token])
+    // Profile  
+    firstName String?
+    lastName  String?
+
+    Session Session[]
+    Machine Machine[]
 }
+
+
+
 
 //
 // Sessions
@@ -92,7 +56,6 @@ model Session {
     createdAt         DateTime         @default(now())
     updatedAt         DateTime         @updatedAt
     messages          SessionMessage[]
-    usageReports      UsageReport[]
 
     @@unique([accountId, tag])
     @@index([accountId, updatedAt(sort: Desc)])
@@ -117,23 +80,7 @@ model SessionMessage {
 // Github
 //
 
-model GithubUser {
-    id        String    @id
-    /// [GitHubProfile]
-    profile   Json
-    token     Bytes?
-    createdAt DateTime  @default(now())
-    updatedAt DateTime  @updatedAt
-    Account   Account[]
-}
 
-model GithubOrganization {
-    id        String   @id
-    /// [GitHubOrg]
-    profile   Json
-    createdAt DateTime @default(now())
-    updatedAt DateTime @updatedAt
-}
 
 //
 // Utility
@@ -165,22 +112,6 @@ model SimpleCache {
 // Usage Reporting
 //
 
-model UsageReport {
-    id        String   @id @default(cuid())
-    key       String
-    accountId String
-    account   Account  @relation(fields: [accountId], references: [id])
-    sessionId String?
-    session   Session? @relation(fields: [sessionId], references: [id])
-    /// [UsageReportData]
-    data      Json
-    createdAt DateTime @default(now())
-    updatedAt DateTime @updatedAt
-
-    @@unique([accountId, sessionId, key])
-    @@index([accountId])
-    @@index([sessionId])
-}
 
 //
 // Machines
@@ -190,13 +121,13 @@ model Machine {
     id                 String   @id
     accountId          String
     account            Account  @relation(fields: [accountId], references: [id])
-    metadata           String // Encrypted - contains static machine info
-    metadataVersion    Int      @default(0)
-    daemonState        String? // Encrypted - contains dynamic daemon state
-    daemonStateVersion Int      @default(0)
     seq                Int      @default(0)
     active             Boolean  @default(true)
     lastActiveAt       DateTime @default(now())
+    metadata           String   @default("{}")  // Machine metadata (unencrypted in single-user mode)
+    metadataVersion    Int      @default(0)
+    daemonState        String?  // Daemon state (unencrypted in single-user mode)
+    daemonStateVersion Int      @default(0)
     createdAt          DateTime @default(now())
     updatedAt          DateTime @updatedAt
 
