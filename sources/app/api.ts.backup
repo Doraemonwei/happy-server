@@ -3,14 +3,12 @@ import { log, logger } from "@/utils/log";
 import { serializerCompiler, validatorCompiler, ZodTypeProvider } from "fastify-type-provider-zod";
 import { Server, Socket } from "socket.io";
 import { z } from "zod";
-import * as privacyKit from "privacy-kit";
 import { db } from "@/storage/db";
 import { Account, Prisma } from "@prisma/client";
 import { onShutdown } from "@/utils/shutdown";
 import { allocateSessionSeq, allocateUserSeq } from "@/services/seq";
 import { randomKeyNaked } from "@/utils/randomKeyNaked";
 import { AsyncLock } from "@/utils/lock";
-import { auth } from "@/modules/auth";
 import {
     EventRouter,
     ClientConnection,
@@ -23,19 +21,25 @@ import {
     buildMachineActivityEphemeral,
     buildUsageEphemeral,
 } from "@/modules/eventRouter";
+import {
+    incrementWebSocketConnection,
+    decrementWebSocketConnection,
+    sessionAliveEventsCounter,
+    machineAliveEventsCounter,
+    websocketEventsCounter,
+    httpRequestsCounter,
+    httpRequestDurationHistogram
+} from "@/modules/metrics";
 import { activityCache } from "@/modules/sessionCache";
-import { encryptBytes, encryptString } from "@/modules/encrypt";
 import { GitHubProfile } from "./types";
+import { uploadImage } from "@/storage/uploadImage";
 import { separateName } from "@/utils/separateName";
+import { getPublicUrl } from "@/storage/files";
 
 
 declare module 'fastify' {
     interface FastifyRequest {
-        userId: string;
         startTime?: number;
-    }
-    interface FastifyInstance {
-        authenticate: any;
     }
 }
 
@@ -130,8 +134,10 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         const status = reply.statusCode.toString();
 
         // Increment request counter
+        httpRequestsCounter.inc({ method, route, status });
 
         // Record request duration
+        httpRequestDurationHistogram.observe({ method, route, status }, duration);
     });
 
     // Global error handler
@@ -212,12 +218,6 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         };
     });
 
-    // Single-user mode: simplified authentication decorator
-    app.decorate('authenticate', async function (request: any, reply: any) {
-        // Single user mode: directly set fixed userId
-        request.userId = 'default-user';
-        log({ module: 'auth-decorator' }, `Single-user mode: using default user`);
-    });
 
     // Initialize event router
     const eventRouter = new EventRouter();
@@ -465,6 +465,14 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                 }
             });
 
+            // Avatar
+            log({ module: 'github-oauth' }, `Uploading avatar for user ${userId}: ${userData.avatar_url}`);
+            const image = await fetch(userData.avatar_url);
+            const imageBuffer = await image.arrayBuffer();
+            log({ module: 'github-oauth' }, `Uploading avatar for user ${userId}: ${userData.avatar_url}`);
+            const avatar = await uploadImage(userId, 'avatars', 'github', userData.avatar_url, Buffer.from(imageBuffer));
+            log({ module: 'github-oauth' }, `Uploaded avatar for user ${userId}: ${userData.avatar_url}`);
+
             // Name
             const name = separateName(userData.name);
             log({ module: 'github-oauth' }, `Separated name for user ${userId}: ${userData.name} -> ${name.firstName} ${name.lastName}`);
@@ -472,7 +480,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             // Link GitHub user to account
             await db.account.update({
                 where: { id: userId },
-                data: { githubUserId: githubUser.id, firstName: name.firstName, lastName: name.lastName }
+                data: { githubUserId: githubUser.id, avatar, firstName: name.firstName, lastName: name.lastName }
             });
 
             // Send account update to all user connections
@@ -480,7 +488,8 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             const updatePayload = buildUpdateAccountUpdate(userId, {
                 github: userData,
                 firstName: name.firstName,
-                lastName: name.lastName
+                lastName: name.lastName,
+                avatar: avatar
             }, updSeq, randomKeyNaked(12));
             eventRouter.emitUpdate({
                 userId,
@@ -610,11 +619,12 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
 
             // Remove GitHub connection from account and delete GitHub user record
             await db.$transaction(async (tx) => {
-                // Remove link from account
+                // Remove link from account and clear avatar
                 await tx.account.update({
                     where: { id: userId },
                     data: {
-                        githubUserId: null
+                        githubUserId: null,
+                        avatar: Prisma.JsonNull
                     }
                 });
 
@@ -627,7 +637,8 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             // Send account update to all user connections
             const updSeq = await allocateUserSeq(userId);
             const updatePayload = buildUpdateAccountUpdate(userId, {
-                github: null
+                github: null,
+                avatar: null
             }, updSeq, randomKeyNaked(12));
             eventRouter.emitUpdate({
                 userId,
@@ -1180,6 +1191,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             select: {
                 firstName: true,
                 lastName: true,
+                avatar: true,
                 githubUser: true
             }
         });
@@ -1188,6 +1200,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             timestamp: Date.now(),
             firstName: user.firstName,
             lastName: user.lastName,
+            avatar: user.avatar ? { ...user.avatar, url: getPublicUrl(user.avatar.path) } : null,
             github: user.githubUser ? user.githubUser.profile : null
         });
     });
@@ -1758,10 +1771,17 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
 
     io.on("connection", async (socket) => {
         log({ module: 'websocket' }, `New connection attempt from socket: ${socket.id}`);
-        // Single-user mode: extract connection parameters (no token required)
+        const token = socket.handshake.auth.token as string;
         const clientType = socket.handshake.auth.clientType as 'session-scoped' | 'user-scoped' | 'machine-scoped' | undefined;
         const sessionId = socket.handshake.auth.sessionId as string | undefined;
         const machineId = socket.handshake.auth.machineId as string | undefined;
+
+        if (!token) {
+            log({ module: 'websocket' }, `No token provided`);
+            socket.emit('error', { message: 'Missing authentication token' });
+            socket.disconnect();
+            return;
+        }
 
         // Validate session-scoped clients have sessionId
         if (clientType === 'session-scoped' && !sessionId) {
@@ -1779,9 +1799,16 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             return;
         }
 
-        // Single-user mode: use fixed default user
-        const userId = 'default-user';
-        log({ module: 'websocket' }, `Single-user connection: ${userId}, clientType: ${clientType || 'user-scoped'}, sessionId: ${sessionId || 'none'}, machineId: ${machineId || 'none'}, socketId: ${socket.id}`);
+        const verified = await auth.verifyToken(token);
+        if (!verified) {
+            log({ module: 'websocket' }, `Invalid token provided`);
+            socket.emit('error', { message: 'Invalid authentication token' });
+            socket.disconnect();
+            return;
+        }
+
+        const userId = verified.userId;
+        log({ module: 'websocket' }, `Token verified: ${userId}, clientType: ${clientType || 'user-scoped'}, sessionId: ${sessionId || 'none'}, machineId: ${machineId || 'none'}, socketId: ${socket.id}`);
 
         // Store connection based on type
         const metadata = { clientType: clientType || 'user-scoped', sessionId, machineId };
@@ -1808,6 +1835,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
             };
         }
         eventRouter.addConnection(userId, connection);
+        incrementWebSocketConnection(connection.connectionType);
 
         // Broadcast daemon online status
         if (connection.connectionType === 'machine-scoped') {
@@ -1825,9 +1853,11 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         const receiveUsageLock = new AsyncLock();
 
         socket.on('disconnect', () => {
+            websocketEventsCounter.inc({ event_type: 'disconnect' });
 
             // Cleanup connections
             eventRouter.removeConnection(userId, connection);
+            decrementWebSocketConnection(connection.connectionType);
 
             // Clean up RPC listeners for this socket
             const userRpcMap = rpcListeners.get(userId);
@@ -1871,6 +1901,8 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         }) => {
             try {
                 // Track metrics
+                websocketEventsCounter.inc({ event_type: 'session-alive' });
+                sessionAliveEventsCounter.inc();
 
                 // Basic validation
                 if (!data || typeof data.time !== 'number' || !data.sid) {
@@ -1914,6 +1946,8 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         }) => {
             try {
                 // Track metrics
+                websocketEventsCounter.inc({ event_type: 'machine-alive' });
+                machineAliveEventsCounter.inc();
 
                 // Basic validation
                 if (!data || typeof data.time !== 'number' || !data.machineId) {
@@ -1994,6 +2028,7 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
         socket.on('message', async (data: any) => {
             await receiveMessageLock.inLock(async () => {
                 try {
+                    websocketEventsCounter.inc({ event_type: 'message' });
                     const { sid, message, localId } = data;
 
                     log({ module: 'websocket' }, `Received message from socket ${socket.id}: sessionId=${sid}, messageLength=${message.length} bytes, connectionType=${connection.connectionType}, connectionSessionId=${connection.connectionType === 'session-scoped' ? connection.sessionId : 'N/A'}`);
@@ -2007,9 +2042,9 @@ export async function startApi(): Promise<{ app: FastifyInstance; io: Server }> 
                     }
                     let useLocalId = typeof localId === 'string' ? localId : null;
 
-                    // Create plaintext message (single-user mode)
+                    // Create encrypted message
                     const msgContent: PrismaJson.SessionMessageContent = {
-                        t: 'plain',
+                        t: 'encrypted',
                         c: message
                     };
 

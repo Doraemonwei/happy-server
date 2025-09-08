@@ -1,6 +1,5 @@
 import { db } from "@/storage/db";
 import { log } from "@/utils/log";
-import { sessionCacheCounter, databaseUpdatesSkippedCounter } from "@/modules/metrics";
 
 interface SessionCacheEntry {
     validUntil: number;
@@ -52,11 +51,9 @@ class ActivityCache {
         
         // Check cache first
         if (cached && cached.validUntil > now && cached.userId === userId) {
-            sessionCacheCounter.inc({ operation: 'session_validation', result: 'hit' });
             return true;
         }
         
-        sessionCacheCounter.inc({ operation: 'session_validation', result: 'miss' });
         
         // Cache miss - check database
         try {
@@ -88,11 +85,9 @@ class ActivityCache {
         
         // Check cache first
         if (cached && cached.validUntil > now && cached.userId === userId) {
-            sessionCacheCounter.inc({ operation: 'machine_validation', result: 'hit' });
             return true;
         }
         
-        sessionCacheCounter.inc({ operation: 'machine_validation', result: 'miss' });
         
         // Cache miss - check database
         try {
@@ -136,7 +131,6 @@ class ActivityCache {
             return true;
         }
         
-        databaseUpdatesSkippedCounter.inc({ type: 'session' });
         return false; // No update needed
     }
 
@@ -153,7 +147,6 @@ class ActivityCache {
             return true;
         }
         
-        databaseUpdatesSkippedCounter.inc({ type: 'machine' });
         return false; // No update needed
     }
 

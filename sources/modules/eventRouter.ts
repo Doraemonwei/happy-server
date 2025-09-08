@@ -2,7 +2,6 @@ import { Socket } from "socket.io";
 import { log } from "@/utils/log";
 import { GitHubProfile } from "@/app/types";
 import { AccountProfile } from "@/types";
-import { getPublicUrl } from "@/storage/files";
 
 // === CONNECTION TYPES ===
 

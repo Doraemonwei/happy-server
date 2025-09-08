@@ -16,10 +16,6 @@ spec:
     metadata:
       labels:
         app: handy-server
-      annotations:
-        prometheus.io/scrape: "true"
-        prometheus.io/port: "9090"
-        prometheus.io/path: "/metrics"
     spec:
       containers:
       - name: handy
@@ -31,13 +27,10 @@ spec:
           value: production
         - name: PORT
           value: "3005"
-        - name: REDIS_URL
-          value: redis://happy-redis:6379
-        - name: S3_PUBLIC_URL
-          value: https://files.cluster-fluster.com/happy
-        envFrom:
-        - secretRef:
-            name: handy-secrets
+        - name: DATABASE_URL
+          value: file:./prisma/dev.db
+        - name: HANDY_MASTER_SECRET
+          value: your-super-secret-key-for-single-user-deployment
         livenessProbe:
           httpGet:
             path: /health
@@ -64,28 +57,6 @@ spec:
   selector:
     matchLabels:
       app: handy-server
----
-apiVersion: external-secrets.io/v1beta1
-kind: ExternalSecret
-metadata:
-  name: handy-secrets
-spec:
-  refreshInterval: 1h
-  secretStoreRef:
-    name: vault-backend
-    kind: SecretStore
-  target:
-    name: handy-secrets
-    creationPolicy: Owner
-  dataFrom:
-    - extract:
-        key: /handy-db
-    - extract:
-        key: /handy-master
-    - extract:
-        key: /handy-github
-    - extract:
-        key: /handy-files
 ---
 apiVersion: v1
 kind: Service

@@ -3,14 +3,32 @@ import { log } from "@/utils/log";
 import { awaitShutdown, onShutdown } from "@/utils/shutdown";
 import { db } from './storage/db';
 import { startTimeout } from "./app/timeout";
-import { redis } from "./services/redis";
-import { startMetricsServer } from "@/app/metrics";
 import { activityCache } from "@/modules/sessionCache";
 import { auth } from "./modules/auth";
-import { startDatabaseMetricsUpdater } from "@/modules/metrics";
 import { initEncrypt } from "./modules/encrypt";
 import { initGithub } from "./modules/github";
-import { loadFiles } from "./storage/files";
+
+async function initializeDefaultUser() {
+    // Ensure default user exists for single-user mode
+    try {
+        await db.account.upsert({
+            where: { id: 'default-user' },
+            create: { 
+                id: 'default-user',
+                publicKey: 'dummy-single-user-key', // Temporary until schema is simplified in Phase 5
+                createdAt: new Date(),
+                updatedAt: new Date()
+            },
+            update: {
+                updatedAt: new Date()
+            }
+        });
+        log('Default user initialized successfully');
+    } catch (error) {
+        log({ level: 'error' }, `Failed to initialize default user: ${error}`);
+        throw error;
+    }
+}
 
 async function main() {
 
@@ -22,12 +40,13 @@ async function main() {
     onShutdown('activity-cache', async () => {
         activityCache.shutdown();
     });
-    await redis.ping();
+
+    // Single-user mode: ensure default user exists
+    await initializeDefaultUser();
 
     // Initialize auth module
     await initEncrypt();
     await initGithub();
-    await loadFiles();
     await auth.init();
 
     //
@@ -35,8 +54,6 @@ async function main() {
     //
 
     await startApi();
-    await startMetricsServer();
-    startDatabaseMetricsUpdater();
     startTimeout();
 
     //
