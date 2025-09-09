@@ -7,9 +7,11 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "build": "tsc --noEmit",
+    "build": "tsc && tsc-alias && tsc-esm-fix --target=dist",
     "start": "tsx --env-file=.env ./sources/main.ts",
+    "start:compiled": "node --env-file=.env ./dist/main.js",
     "dev": "tsx  --env-file=.env.dev ./sources/main.ts",
+    "dev:compiled": "node --env-file=.env.dev ./dist/main.js",
     "test": "vitest run",
     "migrate": "dotenv -e .env -- prisma migrate deploy",
     "migrate:reset": "dotenv -e .env.dev -- prisma migrate reset",
@@ -24,6 +26,8 @@
     "@types/uuid": "^9.0.8",
     "dotenv-cli": "^8.0.0",
     "ts-node": "^10.9.2",
+    "tsc-alias": "^1.8.16",
+    "tsc-esm-fix": "^3.1.2",
     "typescript": "^5.4.3",
     "yaml": "^2.4.2"
   },
